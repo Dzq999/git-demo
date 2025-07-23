@@ -1,0 +1,1075 @@
+dsname_list_generator.py
+
+import pandas as pd
+import json
+from collections import defaultdict
+
+
+def update_dsname_based_on_list(input_file, output_file):
+    """
+    根据dsname_list更新dsname列
+    规则：
+    1. 如果dsname存在于dsname_list中，则保持dsname不变
+    2. 如果dsname_list为空列表，则保持dsname不变
+    3. 如果dsname不在dsname_list中，则将dsname改为dsname_list中的第一个值
+    """
+    try:
+        # 读取Excel文件
+        df = pd.read_excel(input_file)
+
+        # 确保必要的列存在
+        if 'dsname' not in df.columns or 'dsname_list' not in df.columns:
+            print("错误：文件中缺少'dsname'或'dsname_list'列")
+            return
+
+        # 处理每一行数据
+        for index, row in df.iterrows():
+            current_dsname = row['dsname']
+            dsname_list = row['dsname_list']
+
+            # 如果dsname_list是字符串，尝试转换为列表
+            if isinstance(dsname_list, str):
+                try:
+                    dsname_list = eval(dsname_list)
+                except:
+                    dsname_list = []
+
+            # 应用更新规则
+            if not isinstance(dsname_list, list) or len(dsname_list) == 0:
+                continue  # dsname_list为空，不做修改
+
+            if pd.isna(current_dsname) or current_dsname == '':
+                # 如果当前dsname为空，使用dsname_list的第一个值
+                df.at[index, 'dsname'] = dsname_list[0]
+            elif current_dsname not in dsname_list:
+                # 当前dsname不在dsname_list中，使用第一个值
+                df.at[index, 'dsname'] = dsname_list[0]
+            # 当前dsname在dsname_list中，不做修改
+
+        # 保存结果
+        df.to_excel(output_file, index=False)
+        print(f"处理完成，结果已保存到: {output_file}")
+
+    except Exception as e:
+        print(f"处理文件时出错: {e}")
+
+
+def process_tagging_data(tagging_file, hashes_file, output_file):
+    # 1. 读取Excel文件
+    try:
+        df = pd.read_excel(tagging_file)
+    except Exception as e:
+        print(f"读取Excel文件失败: {e}")
+        return
+
+    # 2. 添加/检查dsname_list列
+    if 'dsname_list' not in df.columns:
+        df['dsname_list'] = [[] for _ in range(len(df))]
+
+    # 3. 读取哈希文件
+    try:
+        with open(hashes_file, 'r', encoding='utf-8') as f:
+            hashes_data = json.load(f)
+    except Exception as e:
+        print(f"读取哈希文件失败: {e}")
+        return
+
+    # 4. 构建哈希到dsname的映射（一个hash可能对应多个dsname）
+    hash_to_dsnames = defaultdict(list)
+
+    for top_dir, datasets in hashes_data.items():
+        for dsname, hash_data in datasets.items():
+            for hash_val in hash_data['hashes']:
+                if dsname not in hash_to_dsnames[hash_val]:
+                    hash_to_dsnames[hash_val].append(dsname)
+
+    # 5. 匹配hash_id并填充dsname_list
+    for index, row in df.iterrows():
+        hash_id = row.get('hash_id')
+        if pd.isna(hash_id) or hash_id == '':
+            continue
+
+        # 获取所有匹配的dsname
+        matched_dsnames = hash_to_dsnames.get(str(hash_id), [])
+
+        # 去重并更新
+        if matched_dsnames:
+            unique_dsnames = list(set(matched_dsnames))  # 去重
+            df.at[index, 'dsname_list'] = unique_dsnames
+
+    # 6. 保存结果
+    try:
+        df.to_excel(output_file, index=False)
+        print(f"处理完成，结果已保存到: {output_file}")
+    except Exception as e:
+        print(f"保存结果文件失败: {e}")
+
+
+# 使用示例
+if __name__ == "__main__":
+    # 第一步：处理tagging_data.xlsx，添加dsname_list列
+    process_tagging_data(
+        tagging_file="已处理数据_第二批_处理后.xlsx",
+        hashes_file="all_hashes_raw.json",
+        output_file="已处理数据_第二批_处理后_dsname_list.xlsx"
+    )
+
+    # 第二步：根据dsname_list更新dsname列
+    update_dsname_based_on_list(
+        input_file="已处理数据_第二批_处理后_dsname_list.xlsx",
+        output_file="已处理数据_第二批_处理后_dsname_list.xlsx"
+    )
+
+export_annotated_data.py
+import json
+import pandas as pd
+from openpyxl import Workbook
+
+
+def match_hashes_and_export_to_xlsx(unmatched_hashes_file, all_dedup_file, output_xlsx):
+    # Load the JSON files
+    with open(unmatched_hashes_file, 'r') as f:
+        unmatched_data = json.load(f)
+
+    with open(all_dedup_file, 'r') as f:
+        all_dedup_data = json.load(f)
+
+    # Prepare a list to store all matched records
+    matched_records = []
+
+    # Iterate through each category (chat, base, reasoning)
+    for category in unmatched_data:
+        if category not in all_dedup_data:
+            continue
+
+        # Iterate through each dataset in the category
+        for dataset in unmatched_data[category]:
+            if dataset not in all_dedup_data[category]:
+                continue
+
+            # Get the list of hashes to match
+            hashes_to_match = unmatched_data[category][dataset].get('hashes', [])
+
+            # Get the list of items to search through
+            items_to_search = all_dedup_data[category][dataset]
+
+            # Convert to a dictionary for faster lookup
+            hash_to_item = {item['origin_prompt_hash']: item for item in items_to_search}
+
+            # Find matches
+            for hash_val in hashes_to_match:
+                if hash_val in hash_to_item:
+                    item = hash_to_item[hash_val]
+                    matched_records.append({
+                        'top_dir': item['top_dir'],
+                        'correct': item['correct'],
+                        'hash_id': item['origin_prompt_hash'],
+                        'dsname': item['dsname'],
+                        'file_name': item['file_name'],
+                        'idx': item['idx'],
+                        'origin_prompt': item['origin_prompt'],
+                        'instruct_prompts': item['instruct_prompts']
+                    })
+
+    # Convert to DataFrame and export to Excel
+    if matched_records:
+        df = pd.DataFrame(matched_records)
+        df.to_excel(output_xlsx, index=False)
+        print(f"Successfully exported {len(matched_records)} matched records to {output_xlsx}")
+    else:
+        print("No matches found.")
+
+
+# Example usage:
+match_hashes_and_export_to_xlsx(
+    '统计/unmatched_hashes_with_hashes.json',
+    'a_all_dedup.json',
+    '待发数据_未处理.xlsx'
+)
+
+json_excel_hash_matcher.py
+import json
+import pandas as pd
+from collections import defaultdict
+
+
+def process_matched_hashes_with_hashes(json_data, xlsx_df):
+    # 初始化结果字典，保持原结构
+    matched_results = {
+        "chat": {},
+        "base": {},
+        "reasoning": {}
+    }
+
+    # 预先填充所有dataset，保持原结构
+    for category in ['chat', 'base', 'reasoning']:
+        for dataset_name, dataset_data in json_data.get(category, {}).items():
+            matched_results[category][dataset_name] = {
+                "hashes": [],
+                "count": 0
+            }
+
+    # 遍历XLSX文件中的每一行
+    for _, row in xlsx_df.iterrows():
+        hash_id = row['hash_id']
+        dsname_list = row['dsname_list'] if pd.notna(row['dsname_list']) else []
+
+        # 检查每个dataset是否在JSON中
+        for category in ['chat', 'base', 'reasoning']:
+            for dataset_name, dataset_data in json_data.get(category, {}).items():
+                if dataset_name in dsname_list and hash_id in dataset_data['hashes']:
+                    matched_results[category][dataset_name]["hashes"].append(hash_id)
+                    matched_results[category][dataset_name]["count"] += 1
+
+    return matched_results
+
+
+def process_unmatched_hashes_with_hashes(json_data, xlsx_df):
+    # 初始化结果字典，保持原结构
+    unmatched_results = {
+        "chat": {},
+        "base": {},
+        "reasoning": {}
+    }
+
+    # 获取XLSX文件中所有hash_id的集合
+    all_hashes_in_xlsx = set(xlsx_df['hash_id'].dropna().unique())
+
+    # 填充未匹配的hash_id
+    for category in ['chat', 'base', 'reasoning']:
+        for dataset_name, dataset_data in json_data.get(category, {}).items():
+            unmatched_hashes = [h for h in dataset_data['hashes'] if h not in all_hashes_in_xlsx]
+            unmatched_results[category][dataset_name] = {
+                "hashes": unmatched_hashes,
+                "count": len(unmatched_hashes)
+            }
+
+    return unmatched_results
+
+
+def process_matched_hashes_count_only(json_data, xlsx_df):
+    # 初始化结果字典
+    matched_counts = {
+        "chat": {},
+        "base": {},
+        "reasoning": {}
+    }
+
+    # 预先填充所有dataset，包含原始数量、匹配数量和差值
+    for category in ['chat', 'base', 'reasoning']:
+        for dataset_name, dataset_data in json_data.get(category, {}).items():
+            matched_counts[category][dataset_name] = {
+                "original_count": dataset_data['count'],  # 原始数量
+                "matched_count": 0,  # 匹配数量
+                "difference": 0  # 差值（初始化为0，后面会计算）
+            }
+
+    # 遍历XLSX文件中的每一行
+    for _, row in xlsx_df.iterrows():
+        hash_id = row['hash_id']
+        dsname_list = row['dsname_list'] if pd.notna(row['dsname_list']) else []
+
+        # 检查每个dataset是否在JSON中
+        for category in ['chat', 'base', 'reasoning']:
+            for dataset_name, dataset_data in json_data.get(category, {}).items():
+                if dataset_name in dsname_list and hash_id in dataset_data['hashes']:
+                    matched_counts[category][dataset_name]["matched_count"] += 1
+
+    # 计算差值
+    for category in matched_counts:
+        for dataset in matched_counts[category]:
+            original = matched_counts[category][dataset]["original_count"]
+            matched = matched_counts[category][dataset]["matched_count"]
+            matched_counts[category][dataset]["difference"] = original - matched
+
+    return matched_counts
+
+
+def process_unmatched_hashes_simple(json_data, xlsx_df):
+    # 获取所有hash_id的集合
+    all_hashes_in_json = set()
+    for category in ['chat', 'base', 'reasoning']:
+        for dataset_data in json_data.get(category, {}).values():
+            all_hashes_in_json.update(dataset_data['hashes'])
+
+    # 获取XLSX文件中所有hash_id的集合
+    all_hashes_in_xlsx = set(xlsx_df['hash_id'].dropna().unique())
+
+    # 找出未匹配的hash_id
+    unmatched_hashes = list(all_hashes_in_json - all_hashes_in_xlsx)
+
+    return {
+        "unmatched_hashes": unmatched_hashes,
+        "count": len(unmatched_hashes)
+    }
+
+
+def main():
+    # 读取JSON文件
+    with open('all_hashes_dedup.json', 'r') as f:
+        json_data = json.load(f)
+
+    # 读取XLSX文件
+    xlsx_df = pd.read_excel('已处理数据_第二批_处理后_dsname_list.xlsx')
+
+    # 1. 处理匹配的hash_id（保持原结构）
+    matched_with_hashes = process_matched_hashes_with_hashes(json_data, xlsx_df)
+    with open('统计/matched_hashes_with_hashes.json', 'w') as f:
+        json.dump(matched_with_hashes, f, indent=2)
+
+    # 2. 处理未匹配的hash_id（保持原结构）
+    unmatched_with_hashes = process_unmatched_hashes_with_hashes(json_data, xlsx_df)
+    with open('统计/unmatched_hashes_with_hashes.json', 'w') as f:
+        json.dump(unmatched_with_hashes, f, indent=2)
+
+    # 3. 处理匹配的hash_id（仅计数）
+    matched_counts = process_matched_hashes_count_only(json_data, xlsx_df)
+    with open('统计/matched_hashes_count_only.json', 'w') as f:
+        json.dump(matched_counts, f, indent=2)
+
+    # 4. 处理未匹配的hash_id（简单格式）
+    unmatched_simple = process_unmatched_hashes_simple(json_data, xlsx_df)
+    with open('统计/unmatched_hashes_simple.json', 'w') as f:
+        json.dump(unmatched_simple, f, indent=2)
+
+    print("处理完成！已生成4个JSON文件：")
+    print("1. matched_hashes_with_hashes.json - 保持原结构，包含匹配到的hash_id")
+    print("2. unmatched_hashes_with_hashes.json - 保持原结构，包含未匹配到的hash_id")
+    print("3. matched_hashes_count_only.json - 只记录匹配计数")
+    print("4. unmatched_hashes_simple.json - 简单格式的未匹配记录")
+
+
+if __name__ == "__main__":
+    main()
+
+judge_details_analyzer.py
+import json
+import os
+from collections import defaultdict
+
+def extract_instruct_prompts(prompt_data):
+    """
+    统一处理不同结构的prompt数据，提取instruct_prompts
+
+    参数:
+        prompt_data: 可能是字符串、字典列表或其他形式的prompt数据
+
+    返回:
+        提取到的instruct_prompt字符串，如果没有则返回None
+    """
+    if prompt_data is None:
+        return None
+
+    # 情况1: prompt是字符串
+    if isinstance(prompt_data, str):
+        return prompt_data
+
+    # 情况2: prompt是字典列表
+    if isinstance(prompt_data, list):
+        # 查找最后一个HUMAN或user角色的prompt
+        last_human_prompt = None
+        for item in reversed(prompt_data):  # 反向遍历以找到最后一个符合条件的
+            if isinstance(item, dict):
+                role = item.get('role', '').upper()
+                if role in ['HUMAN', 'USER']:
+                    last_human_prompt = item.get('content') or item.get('prompt')
+                    break  # 找到最后一个就停止
+
+        if last_human_prompt is not None:
+            return last_human_prompt
+
+        # 如果没有找到HUMAN/USER角色，返回第一个有content/prompt的项
+        for item in prompt_data:
+            if isinstance(item, dict):
+                return item.get('content') or item.get('prompt')
+
+    # 情况3: prompt是字典
+    if isinstance(prompt_data, dict):
+        return prompt_data.get('content') or prompt_data.get('prompt')
+
+    return None
+
+def process_directories(directory_list, output_file_raw, output_file_dedup, log_file, count_file_raw, count_file_dedup,
+                        all_file_raw, all_file_dedup):
+    """
+    处理目录以提取origin_prompt_hash信息并保存结果
+    """
+    result_raw = defaultdict(dict)
+    result_dedup = defaultdict(dict)
+    all_data_raw = defaultdict(dict)
+    all_data_dedup = defaultdict(dict)
+    log_data = []
+    count_data_raw = defaultdict(dict)
+    count_data_dedup = defaultdict(dict)
+
+    for top_dir in directory_list:
+        if not os.path.isdir(top_dir):
+            log_data.append({
+                "type": "目录不存在",
+                "path": top_dir,
+                "message": f"找不到顶级目录: {top_dir}"
+            })
+            continue
+
+        for root, dirs, files in os.walk(top_dir):
+            rel_path = os.path.relpath(root, top_dir)
+            if rel_path == '.':
+                continue
+
+            dsname = rel_path.split(os.sep)[0]
+            json_files = [f for f in files if f.endswith('.json')]
+
+            result_raw[top_dir][dsname] = {'hashes': [], 'count': 0}
+            result_dedup[top_dir][dsname] = {'hashes': [], 'count': 0}
+            all_data_raw[top_dir][dsname] = []
+            all_data_dedup[top_dir][dsname] = []
+            count_data_raw[top_dir][dsname] = 0
+            count_data_dedup[top_dir][dsname] = 0
+
+            if not json_files:
+                log_data.append({
+                    "type": "没有JSON文件",
+                    "path": root,
+                    "dsname": dsname,
+                    "message": "该目录下没有JSON文件"
+                })
+                continue
+
+            hash_list_raw = []
+            hash_set = set()
+            all_entries = []
+            dedup_entries = []
+            has_valid_data = False
+
+            # 新增: 用于跟踪每个文件中的idx
+            file_idx_tracker = defaultdict(set)  # {file_name: set(idx)}
+
+            for json_file in json_files:
+                file_path = os.path.join(root, json_file)
+                file_name_without_ext = os.path.splitext(json_file)[0]
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+
+                    if 'judge_details' not in data:
+                        log_data.append({
+                            "type": "缺少字段",
+                            "file_path": file_path,
+                            "dsname": dsname,
+                            "message": "缺少'judge_details'字段"
+                        })
+                        continue
+
+                    judge_details = data['judge_details']
+                    valid_details = False
+
+                    if isinstance(judge_details, list):
+                        for detail in judge_details:
+                            if 'origin_prompt_hash' not in detail:
+                                log_data.append({
+                                    "type": "缺少字段",
+                                    "file_path": file_path,
+                                    "dsname": dsname,
+                                    "message": "缺少'origin_prompt_hash'字段"
+                                })
+                                continue
+
+                            # 检查idx是否已经存在于该文件中
+                            current_idx = detail.get("idx", None)
+                            if current_idx is not None and current_idx in file_idx_tracker[file_name_without_ext]:
+                                continue  # 跳过重复的idx
+
+                            if current_idx is not None:
+                                file_idx_tracker[file_name_without_ext].add(current_idx)
+
+                            hash_value = detail['origin_prompt_hash']
+                            hash_list_raw.append(hash_value)
+                            hash_set.add(hash_value)
+                            valid_details = True
+                            has_valid_data = True
+
+                            instruct_prompts = extract_instruct_prompts(detail.get('prompt'))
+
+                            entry = {
+                                "hash_id": hash_value,
+                                "idx": current_idx,
+                                "origin_prompt": detail.get("origin_prompt", None),
+                                "instruct_prompts": instruct_prompts,
+                                "correct": detail.get("correct", None),
+                                "file_name": file_name_without_ext,
+                                "top_dir": top_dir,
+                                "dsname": dsname
+                            }
+                            all_entries.append(entry)
+
+                    elif isinstance(judge_details, dict):
+                        for key, detail in judge_details.items():
+                            if 'origin_prompt_hash' not in detail:
+                                log_data.append({
+                                    "type": "缺少字段",
+                                    "file_path": file_path,
+                                    "dsname": dsname,
+                                    "message": f"在judge_details的子项{key}中缺少'origin_prompt_hash'字段"
+                                })
+                                continue
+
+                            current_idx = detail.get("idx", None)
+                            if current_idx is not None:
+                                # 如果idx是列表，转换为元组；否则保持不变
+                                idx_to_check = tuple(current_idx) if isinstance(current_idx, list) else current_idx
+                                if idx_to_check in file_idx_tracker[file_name_without_ext]:
+                                    continue  # 跳过重复的idx
+
+                                file_idx_tracker[file_name_without_ext].add(idx_to_check)
+
+                            hash_value = detail['origin_prompt_hash']
+                            hash_list_raw.append(hash_value)
+                            hash_set.add(hash_value)
+                            valid_details = True
+                            has_valid_data = True
+
+                            instruct_prompts = extract_instruct_prompts(detail.get('prompt'))
+
+                            entry = {
+                                "hash_id": hash_value,
+                                "idx": current_idx,
+                                "origin_prompt": detail.get("origin_prompt", None),
+                                "instruct_prompts": instruct_prompts,
+                                "correct": detail.get("correct", None),
+                                "file_name": file_name_without_ext,
+                                "top_dir": top_dir,
+                                "dsname": dsname
+                            }
+                            all_entries.append(entry)
+
+                    if not valid_details:
+                        log_data.append({
+                            "type": "无效数据",
+                            "file_path": file_path,
+                            "dsname": dsname,
+                            "message": "文件中没有有效的judge_details数据"
+                        })
+
+                except (json.JSONDecodeError, IOError) as e:
+                    log_data.append({
+                        "type": "文件错误",
+                        "file_path": file_path,
+                        "dsname": dsname,
+                        "message": str(e)
+                    })
+                    continue
+
+            if has_valid_data:
+                result_raw[top_dir][dsname] = {
+                    'hashes': hash_list_raw,
+                    'count': len(hash_list_raw)
+                }
+                result_dedup[top_dir][dsname] = {
+                    'hashes': list(hash_set),
+                    'count': len(hash_set)
+                }
+                all_data_raw[top_dir][dsname] = all_entries
+
+                seen_hashes = set()
+                for entry in all_entries:
+                    if entry["hash_id"] not in seen_hashes:
+                        dedup_entries.append(entry)
+                        seen_hashes.add(entry["hash_id"])
+                all_data_dedup[top_dir][dsname] = dedup_entries
+
+                count_data_raw[top_dir][dsname] = len(hash_list_raw)
+                count_data_dedup[top_dir][dsname] = len(hash_set)
+
+    # 保存结果到文件 (这部分保持不变)
+    with open(output_file_raw, 'w', encoding='utf-8') as f:
+        json.dump(result_raw, f, indent=2, ensure_ascii=False)
+
+    with open(output_file_dedup, 'w', encoding='utf-8') as f:
+        json.dump(result_dedup, f, indent=2, ensure_ascii=False)
+
+    with open(log_file, 'w', encoding='utf-8') as f:
+        json.dump(log_data, f, indent=2, ensure_ascii=False)
+
+    with open(count_file_raw, 'w', encoding='utf-8') as f:
+        json.dump(count_data_raw, f, indent=2, ensure_ascii=False)
+
+    with open(count_file_dedup, 'w', encoding='utf-8') as f:
+        json.dump(count_data_dedup, f, indent=2, ensure_ascii=False)
+
+    with open(all_file_raw, 'w', encoding='utf-8') as f:
+        json.dump(all_data_raw, f, indent=2, ensure_ascii=False)
+
+    with open(all_file_dedup, 'w', encoding='utf-8') as f:
+        json.dump(all_data_dedup, f, indent=2, ensure_ascii=False)
+
+
+def analyze_missing_judge_details(log_file, output_file):
+    """
+    分析日志文件中缺少'judge_details'字段的信息
+
+    参数:
+        log_file: 日志文件路径
+        output_file: 输出结果文件路径
+    """
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            log_data = json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"无法读取日志文件: {e}")
+        return
+
+    missing_details = defaultdict(list)
+
+    for entry in log_data:
+        if entry.get("type") == "缺少字段" and entry.get("message") == "缺少'judge_details'字段":
+            dsname = entry.get("dsname", "unknown")
+            file_path = entry.get("file_path", "unknown")
+            file_name = os.path.basename(file_path)
+            missing_details[dsname].append(file_name)
+
+    # 转换为普通字典并打印
+    result = dict(missing_details)
+    print("缺少'judge_details'字段的文件:")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    # 保存结果
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+    print(f"结果已保存到: {output_file}")
+
+
+import shutil
+
+
+def copy_missing_files(missing_details_file, source_dirs, target_dir):
+    """
+    将缺少judge_details字段的JSON文件复制到目标目录，并按数据集名称创建子目录
+
+    参数:
+        missing_details_file: 包含缺少字段文件信息的JSON文件路径
+        source_dirs: 原始搜索的目录列表(如["chat", "base"])
+        target_dir: 目标目录路径
+    """
+    try:
+        with open(missing_details_file, 'r', encoding='utf-8') as f:
+            missing_details = json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"无法读取缺少字段的文件列表: {e}")
+        return
+
+    # 创建目标目录
+    os.makedirs(target_dir, exist_ok=True)
+
+    copied_files = 0
+
+    # 遍历所有数据集和文件
+    for dsname, files in missing_details.items():
+        # 为每个数据集创建子目录
+        ds_target_dir = os.path.join(target_dir, dsname)
+        os.makedirs(ds_target_dir, exist_ok=True)
+
+        # 在原始目录中查找这些文件
+        for source_dir in source_dirs:
+            ds_dir = os.path.join(source_dir, dsname)
+            if not os.path.isdir(ds_dir):
+                continue
+
+            # 遍历所有可能的子目录(因为文件可能在子目录中)
+            for root, _, filenames in os.walk(ds_dir):
+                for filename in filenames:
+                    if filename in files:
+                        src_path = os.path.join(root, filename)
+                        dst_path = os.path.join(ds_target_dir, filename)
+
+                        try:
+                            shutil.copy2(src_path, dst_path)
+                            copied_files += 1
+                            print(f"已复制: {src_path} -> {dst_path}")
+                        except IOError as e:
+                            print(f"无法复制文件 {src_path}: {e}")
+
+    print(f"\n已完成! 共复制了 {copied_files} 个文件到 {target_dir}")
+
+
+if __name__ == "__main__":
+    directories = ["chat","base","reasoning"]
+    process_directories(
+        directory_list=directories,
+        output_file_raw="all_hashes_raw.json",        # 原始哈希值列表（包含重复项），按目录和数据集分组
+        output_file_dedup="all_hashes_dedup.json",    # 去重后的唯一哈希值列表，按目录和数据集分组
+        log_file="processing_log.json",               # 处理过程中产生的错误、警告和状态日志
+        count_file_raw="all_counts_raw.json",         # 每个数据集的原始哈希计数统计（含重复项）
+        count_file_dedup="all_counts_dedup.json",     # 每个数据集的去重后哈希计数统计
+        all_file_raw="all_raw.json",                  # 完整原始数据（含重复项），包含每个哈希条目的所有提取字段
+        all_file_dedup="all_dedup.json"               # 去重后的完整数据（仅唯一哈希），包含所有提取字段
+    )
+
+    # 分析缺少judge_details字段的情况
+    analyze_missing_judge_details(
+        log_file="processing_log.json",
+        output_file="a_missing_judge_details.json"
+    )
+
+    # 复制缺少judge_details字段的文件
+    copy_missing_files(
+        missing_details_file="a_missing_judge_details.json",
+        source_dirs=directories,
+        target_dir="a_missing_judge_details_files"
+    )
+
+process_secondary_labels.py
+import pandas as pd
+import os
+from ast import literal_eval
+
+
+def check_dash_count(df, column_name, expected_dash_count):
+    """
+    检查DataFrame中某列的数据是否包含指定数量的 '-'，并检查是否为空值
+
+    Args:
+        df (pd.DataFrame): 要检查的DataFrame
+        column_name (str): 要检查的列名（如 '二级'）
+        expected_dash_count (int): 期望的 '-' 数量
+
+    Returns:
+        tuple: (all_passed, failed_rows)
+            - all_passed (bool): 是否全部数据都符合要求
+            - failed_rows (list): 不符合要求的行号列表（基于DataFrame索引）
+    """
+    try:
+        # 检查列是否存在
+        if column_name not in df.columns:
+            raise ValueError(f"列 '{column_name}' 不存在")
+
+        # 获取该列数据
+        col_data = df[column_name].astype(str)
+
+        # 检查是否为空值
+        is_empty = col_data.str.strip() == ''
+
+        # 检查 '-' 数量
+        dash_counts = col_data.str.count('-')
+
+        # 判断是否符合要求
+        if expected_dash_count == 0:
+            # 当期望为0时，必须不为空，且 '-' 数量为0
+            is_valid = (dash_counts == 0) & (~is_empty)
+        else:
+            # 其他情况只需检查 '-' 数量
+            is_valid = (dash_counts == expected_dash_count)
+
+        # 获取不符合条件的行号（Excel行号从1开始，DataFrame索引从0开始，所以 +2）
+        failed_rows = [i + 2 for i in is_valid[~is_valid].index.tolist()]
+
+        return all(is_valid), failed_rows
+
+    except Exception as e:
+        print(f"错误: {e}")
+        return False, []
+
+
+def process_data(input_file, output_folder, columns_config, columns_to_merge, expected_dashes=None, sheet_name=None):
+    """
+    处理Excel文件中的数据并保存到指定文件夹
+
+    参数:
+        input_file (str): 输入Excel文件路径
+        output_folder (str): 输出文件夹路径
+        columns_config (dict): 列配置 {原列名: 新列名}
+        columns_to_merge (list): 需要合并的列名列表（或包含特殊值'其他'）
+        expected_dashes (int): 合并后应有的'-'数量，None表示不检查
+        sheet_name (str): 工作表名称
+    """
+    try:
+        # 只处理Excel文件
+        file_ext = os.path.splitext(input_file)[1].lower()
+        if file_ext not in ['.xlsx', '.xls']:
+            raise ValueError("仅支持Excel文件")
+
+        # 读取Excel文件
+        df = pd.read_excel(input_file, sheet_name=sheet_name)
+
+        # 检查所有指定的列是否存在
+        all_columns = list(columns_config.keys()) + [col for col in columns_to_merge if col != '其他']
+        for column in all_columns:
+            if column not in df.columns and column != '其他':
+                raise ValueError(f"列 '{column}' 不存在于文件中")
+
+        # 读取并重命名指定列的数据
+        selected_data = df[columns_config.keys()].copy()
+        selected_data.rename(columns=columns_config, inplace=True)
+
+        # 合并指定列的数据（跳过空列）
+        merged_column = []
+
+        for index, row in df.iterrows():
+            parts = []
+
+            for column in columns_to_merge:
+                # 处理特殊值'其他'
+                if column == '其他':
+                    parts.append('其他')
+                    continue
+
+                cell_value = row[column]
+
+                # 检查是否为空值
+                if pd.isna(cell_value) or str(cell_value).strip() == '':
+                    continue  # 跳过空列
+
+                # 尝试将字符串转换为列表
+                try:
+                    evaluated = literal_eval(str(cell_value))
+                    if isinstance(evaluated, list):
+                        cell_value = evaluated
+                except (ValueError, SyntaxError):
+                    pass
+
+                # 处理列表类型的数据
+                if isinstance(cell_value, list):
+                    if len(cell_value) == 0:
+                        parts.append('')  # 空列表处理为空字符串
+                    elif len(cell_value) == 1:
+                        parts.append(str(cell_value[0]))  # 单元素列表取出元素
+                    else:
+                        print(f"警告: 行 {index + 1} 列 '{column}' 有多个元素 ({len(cell_value)})，将使用第一个元素")
+                        parts.append(str(cell_value[0]))  # 多元素列表使用第一个元素
+                else:
+                    parts.append(str(cell_value))
+
+            # 连接非空部分
+            merged_value = '-'.join(parts) if parts else ''
+            merged_column.append(merged_value)
+
+        # 添加合并后的列到新DataFrame
+        selected_data['二级'] = merged_column
+
+        # 确保输出文件夹存在
+        os.makedirs(output_folder, exist_ok=True)
+
+        # 生成输出文件名
+        base_name = os.path.splitext(os.path.basename(input_file))[0]
+        output_base = os.path.join(output_folder, f"{base_name}_processed")
+
+        # 保存为Excel文件
+        excel_file = f"{output_base}.xlsx"
+        selected_data.to_excel(excel_file, index=False)
+        print(f"Excel文件已保存到: {excel_file}")
+
+        # 检查合并后的列（如果有要求）
+        if expected_dashes is not None:
+            all_passed, failed_rows = check_dash_count(selected_data, '二级', expected_dashes)
+            if not all_passed:
+                print(f"共发现 {len(failed_rows)} 处合并格式异常")
+                for line_num in failed_rows:
+                    print(f"异常: Excel行 {line_num} 的 '-' 数量不正确")
+            else:
+                print(f"合并列('二级'列)格式检查完成（应有 {expected_dashes} 个'-'），未发现异常")
+
+    except Exception as e:
+        print(f"处理过程中发生错误: {str(e)}")
+
+
+if __name__ == "__main__":
+    # 输出文件夹
+    output_folder = "processed_results_第二批"
+
+    # 根据 one_title 自动选择配置
+    one_title = "Reasoning"
+
+    # 输入文件路径
+    input_xlsx = f"已打标_第二批/第二批_【iTAG】语言大模型-{one_title}_已打标.xlsx"
+
+    # 配置映射：one_title -> (columns_to_merge, expected_dash_count)
+    config_map = {
+        "Math": (['年级', '题型', '小学', '初中', '高中', '大学', '竞赛'], 2),
+        "Code": (['代码语言', '任务类型', '代码知识点'], 2),
+        "Knowledge": (['二级标签-学科', '其他'], 1),
+        "NLP": (['prompt类型'], 0),
+        "Reasoning": (['单选'], 0),
+        "Stem": (['二级标签-学科', '其他'], 1),
+        "Creative Writing": (['prompt类型'], 0),
+    }
+
+    # 获取当前 one_title 对应的配置
+    if one_title not in config_map:
+        raise ValueError(f"不支持的 one_title: {one_title}。支持的选项为: {list(config_map.keys())}")
+
+    columns_to_merge, expected_dash_count = config_map[one_title]
+
+    # 指定要读取的列及重命名配置 {原列名: 新列名}
+    columns_config = {
+        'top_dir': 'top_dir',
+        'hash_id': 'hash_id',
+        'dsname': 'dsname',
+        'file_name': 'file_name',
+        'idx': 'idx',
+        'origin_prompt': 'origin_prompt',
+        'instruct_prompts': 'instruct_prompts',
+        '一级': '一级'
+    }
+
+    # 执行处理
+    process_data(
+        input_file=input_xlsx,
+        output_folder=output_folder,
+        columns_config=columns_config,
+        columns_to_merge=columns_to_merge,
+        expected_dashes=expected_dash_count,
+        sheet_name='Sheet1'
+    )
+
+split_labeled_and_relabel_data.py
+import pandas as pd
+
+
+def filter_and_save_data(input_xlsx_path, output_xlsx_path, output_filtered_xlsx_path, columns_to_keep_in_filtered,
+                         accuracy_column):
+    """
+    读取XLSX文件，根据指定准确性列进行筛选，并分别保存到两个新的XLSX文件
+    使用xlsxwriter引擎来处理特殊字符
+
+    Args:
+        input_xlsx_path (str): 输入XLSX文件路径
+        output_xlsx_path (str): 输出XLSX文件路径(保存准确的行)
+        output_filtered_xlsx_path (str): 输出XLSX文件路径(保存需要二次标注的行)
+        columns_to_keep_in_filtered (list): 需要在二次标注文件中保留的列
+        accuracy_column (str): 用于判断准确性的列名
+    """
+    try:
+        # 读取XLSX文件
+        df = pd.read_excel(input_xlsx_path)
+
+        # 检查准确性列是否存在
+        if accuracy_column not in df.columns:
+            raise ValueError(f"XLSX文件中没有'{accuracy_column}'列")
+
+        # 筛选出标记为"否"的行
+        filtered_rows = df[df[accuracy_column] == '否'].copy()
+
+        # 检查指定列是否存在
+        missing_columns = [col for col in columns_to_keep_in_filtered if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"XLSX文件中缺少以下指定列: {missing_columns}")
+
+        # 保存标记为"否"的行到XLSX文件（只保留指定列）
+        if not filtered_rows.empty:
+            filtered_rows[columns_to_keep_in_filtered].to_excel(
+                output_filtered_xlsx_path,
+                index=False,
+                engine='xlsxwriter'  # 使用xlsxwriter引擎
+            )
+            print(f"已保存 {len(filtered_rows)} 行数据到 {output_filtered_xlsx_path}")
+        else:
+            print("没有标记为'否'的行需要保存到XLSX文件")
+
+        # 保存其余行到新的XLSX文件
+        remaining_rows = df[df[accuracy_column] != '否']
+        remaining_rows.to_excel(
+            output_xlsx_path,
+            index=False,
+            engine='xlsxwriter'  # 使用xlsxwriter引擎
+        )
+        print(f"已保存 {len(remaining_rows)} 行数据到 {output_xlsx_path}")
+
+    except Exception as e:
+        print(f"处理过程中发生错误: {str(e)}")
+        raise
+
+
+def replace_not_mentioned(input_xlsx_path, output_xlsx_path, column_name='代码语言', old_value='NotMentioned',
+                          new_value='其他'):
+    """
+    检查指定列中的特定值并替换为新值，然后保存到新的XLSX文件
+
+    Args:
+        input_xlsx_path (str): 输入XLSX文件路径
+        output_xlsx_path (str): 输出XLSX文件路径
+        column_name (str): 要检查的列名
+        old_value (str): 需要替换的旧值
+        new_value (str): 替换后的新值
+    """
+    try:
+        # 读取XLSX文件
+        df = pd.read_excel(input_xlsx_path)
+
+        # 检查列是否存在
+        if column_name not in df.columns:
+            raise ValueError(f"XLSX文件中没有'{column_name}'列")
+
+        # 替换特定值
+        df[column_name] = df[column_name].replace(old_value, new_value)
+
+        # 保存到新的XLSX文件
+        df.to_excel(
+            output_xlsx_path,
+            index=False,
+            engine='xlsxwriter'  # 使用xlsxwriter引擎
+        )
+        print(f"已完成替换并保存到 {output_xlsx_path}")
+
+    except Exception as e:
+        print(f"处理过程中发生错误: {str(e)}")
+
+
+# 示例用法
+if __name__ == "__main__":
+    # 输入文件路径
+    input_xlsx = "第二批xlsx/【iTAG】语言大模型-逻辑12_语言大模型-逻辑12_2025070700109837803_UTF__20250718051147.xlsx"
+
+    # 输出文件路径
+    one_title = "Reasoning"
+    output_xlsx = f"已打标_第二批/第二批_【iTAG】语言大模型-{one_title}_已打标.xlsx"
+    output_filtered_xlsx = f"需二次打标_第二批/第二批_【iTAG】语言大模型-{one_title}_需二次打标.xlsx"
+
+    # 根据one_title自动选择accuracy_column和columns_to_keep
+    title_mapping = {
+        "Knowledge QA": {
+            "accuracy_column": "一级类目是否正确（是否属于Knowledge QA）",
+            "last_column": "正确的一级类目"
+        },
+        "NLP": {
+            "accuracy_column": "一级类目是否正确（是否NLP任务）",
+            "last_column": "正确的一级类目"
+        },
+        "Math": {
+            "accuracy_column": "一级类目是否准确",
+            "last_column": "所属一级类目"
+        },
+        "Stem": {
+            "accuracy_column": "一级类目是否正确（是否属于STEM）",
+            "last_column": "正确的一级类目"
+        },
+        "Creative writing": {
+            "accuracy_column": "一级类目是否正确（是否写作任务）",
+            "last_column": "正确的一级类目"
+        },
+        "Reasoning": {
+            "accuracy_column": "一级类目是否准确",
+            "last_column": "所属一级类目"
+        },
+        "Code": {
+            "accuracy_column": "一级类目是否准确",
+            "last_column": "所属一级类目"
+        }
+    }
+
+    # 获取配置
+    config = title_mapping.get(one_title)
+    if not config:
+        raise ValueError(f"未知的标题类型: {one_title}")
+
+    accuracy_column = config["accuracy_column"]
+    last_column = config["last_column"]
+
+    # 要保留在二次标注文件中的列
+    columns_to_keep = ["top_dir", "hash_id", "dsname", "file_name", "idx",
+                       "origin_prompt", "instruct_prompts", last_column]
+
+    # 筛选并保存数据
+    filter_and_save_data(input_xlsx, output_xlsx, output_filtered_xlsx, columns_to_keep, accuracy_column)
+
+    # 如果是Code类型，还需要替换'代码语言'列中的'NotMentioned'为'其他'
+    if one_title == "Code":
+        replace_not_mentioned(output_xlsx, output_xlsx)
